@@ -30,6 +30,7 @@
   31	- Special allocation in JeeLib RFM12 driver - Node31 can communicate with nodes on any network group
   -------------------------------------------------------------------------------------------------------------
   Change log:
+  V3.2.4   - (7/09/17)  Add software debounce for gas meter
   V3.2.3   - (17/07/17) Fix DIP switch had no effect
   V3.2.2   - (12/05/17) Fix DIP switch nodeID not being read when EEPROM is configures
   V3.2.1   - (30/11/16) Fix emonTx port typo
@@ -64,7 +65,7 @@
 boolean debug=1;                                                      // Set to 1 to few debug serial output
 boolean flash_led=0;                                                  // Flash LED after each sample (battery drain) default=0
 
-const unsigned int  version = 323;                                    // firmware version
+const unsigned int  version = 324;                                    // firmware version
 // These variables control the transmit timing of the emonTH
 const unsigned long WDT_PERIOD = 80;                                  // mseconds.
 const unsigned long WDT_MAX_NUMBER = 690;                             // Data sent after WDT_MAX_NUMBER periods of WDT_PERIOD ms without pulses:
@@ -113,6 +114,16 @@ const byte pulse_count_pin=3;                                        // INT 1 / 
 const byte DHT22_PWR=       6;                                      // Not used in emonTH V2.0, 10K resistor R1 connects DHT22 pins
 const byte DHT22_DATA=      16;                                     // Not used in emonTH V2.0, 10K resistor R1 connects DHT22 pins.
 
+//Software debounce based on https://stackoverflow.com/a/33365097
+#define CHECK_EVERY_MS 25
+#define MIN_STABLE_VALS 10
+#define MIN_FALSE_VAL 3
+
+unsigned long previousMillis;
+volatile int stableVals;
+volatile int falseVals;
+volatile boolean lsEngaged;
+
 OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
 boolean DS18B20;                                                      // create flag variable to store presence of DS18B20
@@ -134,7 +145,7 @@ byte allAddress [4][8];                                              // 8 bytes 
 
 volatile unsigned long pulseCount;
 unsigned long WDT_number;
-boolean  p;
+volatile boolean  p;
 
 unsigned long now, start;
 const byte SLAVE_ADDRESS = 42;
@@ -300,7 +311,10 @@ void setup() {
   pulseCount = 0;
   WDT_number=720;
   p = 0;
-  attachInterrupt(pulse_countINT, onPulse, RISING);
+  lsEngaged = HIGH;
+  stableVals = 0;
+  falseVals = 0;
+  attachInterrupt(digitalPinToInterrupt(pulse_count_pin), onPulse, FALLING);
 
   //################################################################################################################################
   // RF Config mode
@@ -355,6 +369,34 @@ void loop()
     Sleepy::loseSomeTime(PULSE_MAX_DURATION);
     p=0;
   }
+
+//Software debounce for reed switch gas meter
+  if (lsEngaged == LOW){
+    if ((millis() - previousMillis) > CHECK_EVERY_MS)
+      {
+          previousMillis += CHECK_EVERY_MS;
+          if ((digitalRead(pulse_count_pin) == LOW) && (lsEngaged == LOW))
+          {
+              stableVals++;
+              Serial.println(stableVals);
+              if (stableVals >= MIN_STABLE_VALS)
+              {
+                  lsEngaged = HIGH;
+                  stableVals = 0;
+                  pulseCount++;
+
+              }
+          }
+          else{
+              stableVals = 0;
+              falseVals++;
+              if (falseVals>=MIN_FALSE_VAL){
+                lsEngaged = HIGH;
+                falseVals = 0;
+               }
+          }
+      }
+    }
 
   if (Sleepy::loseSomeTime(WDT_PERIOD)==1) {
     WDT_number++;
@@ -473,7 +515,8 @@ void dodelay(unsigned int ms)
 void onPulse()
 {
   p=1;                                       // flag for new pulse set to true
-  pulseCount++;                              // number of pulses since the last RF sent
+  lsEngaged = LOW;
+  //pulseCount++;                              // number of pulses since the last RF sent
 }
 
 // Used to test for RFM69CW prescence
